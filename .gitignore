@@ -1,0 +1,11 @@
+models/
+venv/
+data/
+bin/
+dist/
+public/
+visual-qa/
+__pycache__/
+*.pyc
+_backup/
+議事録レコーダー.app

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>議事録レコーダー</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23D51F45'/><stop offset='1' stop-color='%23EF7D00'/></linearGradient></defs><rect x='2' y='2' width='96' height='96' rx='22' fill='url(%23g)'/><g fill='white' transform='translate(10,0) skewX(-11.31)'><rect x='20.1' y='40.5' width='7.8' height='19' rx='3.9'/><rect x='33.1' y='32.5' width='7.8' height='35' rx='3.9'/><rect x='46.1' y='23.5' width='7.8' height='53' rx='3.9'/><rect x='59.1' y='32.5' width='7.8' height='35' rx='3.9'/><rect x='72.1' y='40.5' width='7.8' height='19' rx='3.9'/></g></svg>">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="kicker">Local Minutes Recorder</div>
+      <h1>議事録<span class="accent">レコーダー</span></h1>
+      <div class="h1bar"></div>
+    </div>
+    <div style="text-align:right">
+      <span id="status-pill" class="pill idle">待機中</span>
+      <div class="health" id="health"></div>
+    </div>
+  </header>
+
+  <!-- アップデートの案内 -->
+  <div id="update-bar" class="hidden">
+    <span id="update-text"></span>
+    <button class="btn btn-grad" id="update-btn">いま更新する</button>
+    <button class="link-btn" id="update-later">あとで</button>
+  </div>
+
+  <!-- スタート画面 -->
+  <section id="start-view">
+    <div class="stage">
+      <input id="title-input" class="title-input" type="text" placeholder="会議名（例: メディア教育 定例）— 空欄でもOK" autocomplete="off">
+      <div class="mic-row">
+        <label class="mic-label" for="mic-select">マイク</label>
+        <select id="mic-select" class="mic-select"><option value="">読み込み中…</option></select>
+        <button id="mic-refresh" class="mic-refresh" title="接続し直したデバイスを読み込む">更新</button>
+      </div>
+      <div id="mic-hint" class="mic-hint"></div>
+      <button id="rec-btn" class="rec-btn" title="録音を開始">
+        <svg viewBox="0 0 100 100" fill="none"><rect x="38" y="14" width="24" height="42" rx="12" fill="white"/><path d="M26 50a24 24 0 0 0 48 0M50 78v10M38 88h24" stroke="white" stroke-width="7" stroke-linecap="round"/></svg>
+        <span>録音開始</span>
+      </button>
+      <div class="start-hint">クリックですぐ録音・文字起こしが始まります（すべてこの Mac の中で処理）</div>
+    </div>
+    <div class="history">
+      <h2><span class="ubar"></span>過去の議事録
+        <button id="dict-open" class="link-btn">用語辞書を編集</button>
+      </h2>
+      <div id="mtg-list" class="mtg-list"><div class="wait-note">読み込み中…</div></div>
+    </div>
+  </section>
+
+  <!-- 録音中画面 -->
+  <section id="rec-view" class="hidden">
+    <div id="rec-bar">
+      <span class="pill rec"><span class="dot"></span>録音中</span>
+      <div id="elapsed" class="num">00:00</div>
+      <div class="meter"><div id="meter-fill"></div></div>
+      <div class="rec-title" id="rec-title"></div>
+      <div class="rec-mic" id="rec-mic"></div>
+      <button id="stop-btn" class="stop-btn"><span class="sq"></span>終了して議事録にする</button>
+    </div>
+    <div id="offline-note" class="hidden" style="margin:-6px 0 14px">
+      <span class="pill warn">オフライン — 文字起こしは継続中。議事録はネット復帰後に自動生成されます</span>
+    </div>
+    <div class="cols">
+      <div class="col-minutes card card-minutes">
+        <h2><span class="ubar"></span>ライブ議事録</h2>
+        <div class="sub" id="minutes-sub">最初の更新は開始 1〜2 分後です</div>
+        <div id="minutes-body" class="md-body"><div class="wait-note">録音がたまったら、ここに要約・決定事項・ネクストアクションが自動で育っていきます。</div></div>
+      </div>
+      <div class="col-transcript card card-transcript">
+        <h2><span class="ubar"></span>文字起こし</h2>
+        <div class="sub" id="transcript-sub">約 10 秒ごとに追記されます</div>
+        <div id="transcript-body"></div>
+      </div>
+    </div>
+    <div style="margin-top:12px;text-align:right"><button id="discard-btn" class="discard-btn">間違えて開始した（10 秒以内なら破棄）</button></div>
+  </section>
+
+  <!-- 完了画面 -->
+  <section id="done-view" class="hidden">
+    <div class="done-card">
+      <h2><span class="check">✓</span>議事録を保存しました</h2>
+      <div class="done-path" id="done-path"></div>
+      <div class="done-spk" id="done-spk"></div>
+      <div class="btn-row">
+        <button class="btn btn-grad" id="copy-btn">Markdown をコピー（Notion 用）</button>
+        <button class="btn btn-outline" id="html-copy">HTML をコピー（Slack に貼付）</button>
+        <button class="btn btn-ghost" id="html-btn">HTML を開いて確認</button>
+        <button class="btn btn-ghost" id="reveal-btn">Finder で表示</button>
+        <button class="btn btn-ghost" id="new-btn">新しい会議をはじめる</button>
+        <span id="copy-done" class="copied hidden">コピーしました</span>
+      </div>
+    </div>
+    <div class="cols">
+      <div class="col-minutes card card-minutes">
+        <h2><span class="ubar"></span>最終議事録</h2>
+        <div id="done-minutes" class="md-body"></div>
+      </div>
+      <div class="col-transcript card card-transcript">
+        <h2><span class="ubar"></span>文字起こし全文</h2>
+        <div id="done-transcript" style="max-height:60vh;overflow-y:auto"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 過去の議事録ビューア -->
+  <section id="viewer-view" class="hidden">
+    <div class="vhead">
+      <div>
+        <div class="vtitle" id="v-title"></div>
+        <div class="vmeta" id="v-meta"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-grad" id="v-copy">コピー</button>
+        <button class="btn btn-outline" id="v-html-copy">HTML をコピー（Slack に貼付）</button>
+        <button class="btn btn-ghost" id="v-html">HTML を開いて確認</button>
+        <button class="btn btn-outline" id="v-reveal">Finder で表示</button>
+        <button class="btn btn-ghost" id="v-back">← 戻る</button>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="minutes">議事録</button>
+      <button class="tab" data-tab="transcript">文字起こし</button>
+    </div>
+    <div id="v-regen-row" class="hidden" style="margin-bottom:12px">
+      <button class="btn btn-grad" id="v-regen">議事録をいま生成する</button>
+      <span style="font-size:12px;color:var(--gray)">（録音時はオフラインだったため文字起こしのみ保存されています）</span>
+    </div>
+    <div id="viewer-body" class="md-body"></div>
+  </section>
+
+  <!-- 用語辞書画面 -->
+  <section id="dict-view" class="hidden">
+    <div class="vhead">
+      <div>
+        <div class="vtitle">用語辞書</div>
+        <div class="vmeta">社名・人名・専門用語を登録すると、文字起こしと議事録の表記が安定します</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-grad" id="dict-save">保存する</button>
+        <button class="btn btn-ghost" id="dict-back">← 戻る</button>
+        <span id="dict-msg" class="copied hidden">保存しました</span>
+      </div>
+    </div>
+    <div class="dict-note">
+      <strong>読み</strong>はひらがなで、<strong>正式表記</strong>は実際に書き起こしたい形で入れてください（例: <code>わんせく</code> → <code>1sec.</code>）。
+      録音中でも保存すれば次の文字起こしから反映されます。
+    </div>
+    <table class="dict-table">
+      <thead><tr><th style="width:26%">読み（ひらがな）</th><th style="width:28%">正式表記</th><th>メモ（任意）</th><th style="width:44px"></th></tr></thead>
+      <tbody id="dict-rows"></tbody>
+    </table>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn btn-ghost" id="dict-add">＋ 用語を追加</button>
+      <span class="dict-path" id="dict-path"></span>
+    </div>
+  </section>
+
+  <!-- 処理中オーバーレイ -->
+  <div id="busy" class="hidden">
+    <div class="spinner"></div>
+    <div id="busy-label">残りの音声を文字起こし中…</div>
+    <div id="busy-sub">そのままお待ちください</div>
+  </div>
+
+  <footer>
+    <span>gijiroku-app — 音声はこの Mac の外に出ません（要約時のみ Claude にテキスト送信）</span>
+    <span class="num" id="ver">v1</span>
+  </footer>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
