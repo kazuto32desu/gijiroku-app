@@ -36,6 +36,18 @@ fi
 echo "対象: $TARGET"
 echo "現在の版: $(cat "$TARGET/VERSION" 2>/dev/null || echo '1.01 以前')"
 echo
+
+# 古いアプリが裏で動いていたら止める（止めないと、更新後も古いプログラムのまま動き続ける）
+STATE="$(/usr/bin/curl -s -m 3 http://127.0.0.1:8940/api/state 2>/dev/null)"
+if echo "$STATE" | grep -qE '"status": "(recording|finalizing|summarizing)"'; then
+  echo "⚠️ いま録音中か、議事録を作っている途中です。終わってから、もう一度ダブルクリックしてください。"
+  echo; read -n 1 -s -r -p "何かキーを押すと閉じます"; exit 1
+fi
+if [ -n "$STATE" ]; then
+  /usr/bin/curl -s -m 3 -X POST http://127.0.0.1:8940/api/quit > /dev/null 2>&1 && echo "動いていたアプリをいったん止めました"
+  sleep 1
+fi
+
 echo "更新しています（30秒ほど）..."
 xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
 
