@@ -33,6 +33,12 @@
     <div class="stage">
       <input id="title-input" class="title-input" type="text" placeholder="会議名（例: メディア教育 定例）— 空欄でもOK" autocomplete="off">
       <div class="mic-row">
+        <label class="mic-label" for="participants-input">参加者</label>
+        <input id="participants-input" class="mic-select participants-input" type="text" placeholder="任意。例: 山田、佐藤、鈴木" autocomplete="off">
+        <button id="participants-last" class="mic-refresh hidden" title="前回の会議の参加者を入れる">前回と同じ</button>
+      </div>
+      <div class="mic-hint">入れておくと、議事録の担当者をこの中からだけ選びます（名前の取り違え防止）</div>
+      <div class="mic-row">
         <label class="mic-label" for="mic-select">マイク</label>
         <select id="mic-select" class="mic-select"><option value="">読み込み中…</option></select>
         <button id="mic-refresh" class="mic-refresh" title="接続し直したデバイスを読み込む">更新</button>
@@ -74,6 +80,7 @@
       <div class="col-transcript card card-transcript">
         <h2><span class="ubar"></span>文字起こし</h2>
         <div class="sub" id="transcript-sub">約 10 秒ごとに追記されます</div>
+        <div class="flag-legend hidden" id="transcript-body-legend">要確認 ＝ 聞き間違いの疑いがある行（議事録の根拠にはしません）</div>
         <div id="transcript-body"></div>
       </div>
     </div>
@@ -102,6 +109,7 @@
       </div>
       <div class="col-transcript card card-transcript">
         <h2><span class="ubar"></span>文字起こし全文</h2>
+        <div class="flag-legend hidden" id="done-transcript-legend">要確認 ＝ 聞き間違いの疑いがある行（議事録の根拠にはしません）</div>
         <div id="done-transcript" style="max-height:60vh;overflow-y:auto"></div>
       </div>
     </div>
@@ -119,6 +127,7 @@
         <button class="btn btn-outline" id="v-html-copy">HTML をコピー（Slack に貼付）</button>
         <button class="btn btn-ghost" id="v-html">HTML を開いて確認</button>
         <button class="btn btn-outline" id="v-reveal">Finder で表示</button>
+        <button class="btn btn-ghost" id="v-redo">参加者を入れて作り直す</button>
         <button class="btn btn-ghost" id="v-back">← 戻る</button>
       </div>
     </div>
@@ -126,9 +135,11 @@
       <button class="tab active" data-tab="minutes">議事録</button>
       <button class="tab" data-tab="transcript">文字起こし</button>
     </div>
-    <div id="v-regen-row" class="hidden" style="margin-bottom:12px">
+    <div id="v-regen-row" class="regen-row hidden">
+      <label class="mic-label" for="v-participants">参加者</label>
+      <input id="v-participants" class="mic-select participants-input" type="text" placeholder="任意。例: 山田、佐藤、鈴木" autocomplete="off">
       <button class="btn btn-grad" id="v-regen">議事録をいま生成する</button>
-      <span style="font-size:12px;color:var(--gray)">（録音時はオフラインだったため文字起こしのみ保存されています）</span>
+      <span class="regen-note" id="v-regen-note">（録音時はオフラインだったため文字起こしのみ保存されています）</span>
     </div>
     <div id="viewer-body" class="md-body"></div>
   </section>
@@ -138,7 +149,7 @@
     <div class="vhead">
       <div>
         <div class="vtitle">用語辞書</div>
-        <div class="vmeta">社名・人名・専門用語を登録すると、文字起こしと議事録の表記が安定します</div>
+        <div class="vmeta">専門用語・社名・人名を登録すると、文字起こしと議事録の表記が安定します</div>
       </div>
       <div class="btn-row">
         <button class="btn btn-grad" id="dict-save">保存する</button>
@@ -147,11 +158,12 @@
       </div>
     </div>
     <div class="dict-note">
-      <strong>読み</strong>はひらがなで、<strong>正式表記</strong>は実際に書き起こしたい形で入れてください（例: <code>わんせく</code> → <code>1sec.</code>）。
-      録音中でも保存すれば次の文字起こしから反映されます。
+      <strong>読み</strong>はひらがなで、<strong>正式表記</strong>は実際に書き起こしたい形で入れてください（例: <code>わんせく</code> → <code>1sec.</code>）。録音中でも保存すれば次の文字起こしから反映されます。<br>
+      <strong>種別</strong>が「人名」「社名」の語は、議事録の表記合わせにだけ使います（文字起こしのヒントに入れると、無音の部分にその名前が差し込まれるため）。<br>
+      会議に出る人の名前は、録音開始前に<span style="white-space:nowrap">「参加者」</span>欄へ入れてください。
     </div>
     <table class="dict-table">
-      <thead><tr><th style="width:26%">読み（ひらがな）</th><th style="width:28%">正式表記</th><th>メモ（任意）</th><th style="width:44px"></th></tr></thead>
+      <thead><tr><th style="width:22%">読み（ひらがな）</th><th style="width:24%">正式表記</th><th style="width:96px">種別</th><th>メモ（任意）</th><th style="width:44px"></th></tr></thead>
       <tbody id="dict-rows"></tbody>
     </table>
     <div class="btn-row" style="margin-top:12px">

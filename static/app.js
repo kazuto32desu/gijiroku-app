@@ -123,15 +123,30 @@ function selectedMicName() {
   return i >= 0 ? micLabel(micDevices[i], i) : "自動";
 }
 
+/* ---------- 参加者 ---------- */
+// 前回の参加者は「前回と同じ」ボタンで 1 クリックで入れられる（自動では入れない — 別の会議に紛れ込ませない）
+const LAST_PARTICIPANTS_KEY = "gijiroku.lastParticipants";
+function loadLastParticipants() {
+  const last = localStorage.getItem(LAST_PARTICIPANTS_KEY) || "";
+  const btn = $("participants-last");
+  btn.classList.toggle("hidden", !last);
+  btn.title = last ? `前回の参加者を入れる: ${last}` : "";
+}
+$("participants-last").addEventListener("click", () => {
+  $("participants-input").value = localStorage.getItem(LAST_PARTICIPANTS_KEY) || "";
+});
+
 /* ---------- 録音 ---------- */
 async function startRecording() {
   const title = $("title-input").value;
+  const participants = $("participants-input").value.trim();
   let r;
   try {
-    r = await fetch("/api/start", { method: "POST", body: JSON.stringify({ title }) });
+    r = await fetch("/api/start", { method: "POST", body: JSON.stringify({ title, participants }) });
   } catch (e) { alert("サーバーに接続できません: " + e); return; }
   if (!r.ok) { alert((await r.json()).error || "開始できませんでした"); return; }
   sessionId = (await r.json()).id;
+  if (participants) localStorage.setItem(LAST_PARTICIPANTS_KEY, participants);
 
   mediaStream = null;
   let micErr = null;
@@ -172,11 +187,13 @@ async function startRecording() {
   flushTimer = setInterval(flushAudio, 400);
   uiState = "recording";
   $("rec-title").textContent = title || "（無題の会議）";
+  $("rec-title").title = participants ? `参加者: ${participants}` : "";
   const track = mediaStream.getAudioTracks()[0];
   $("rec-mic").textContent = (track && track.label) || selectedMicName();
   loadMics(true);   // 許可が下りた直後はデバイス名が取れるようになる
   $("minutes-body").innerHTML = '<div class="wait-note">録音がたまったら、ここに要約・決定事項・ネクストアクションが自動で育っていきます。</div>';
   $("transcript-body").innerHTML = "";
+  $("transcript-body-legend").classList.add("hidden");
   lastSegCount = -1; lastMinutes = "";
   followTranscript = true;
   setPill("rec", "録音中");
@@ -302,19 +319,25 @@ async function poll() {
 
 function renderSegments(segs, targetId) {
   const el = $(targetId);
-  if (segs.length === lastSegCount && targetId === "transcript-body") return;
-  if (targetId === "transcript-body") lastSegCount = segs.length;
+  // 行数＋要確認の数が変わったときだけ描き直す（繰り返しが確定すると、既に出た行に後から印が付く）
+  const sig = segs.length * 1000 + segs.filter((s) => s.flag).length;
+  if (sig === lastSegCount && targetId === "transcript-body") return;
+  if (targetId === "transcript-body") lastSegCount = sig;
   el.innerHTML = segs
     .map((s) => {
       const chip = s.speaker ? `<span class="chip spk${((s.speaker - 1) % 6) + 1}" title="スピーカー${s.speaker}">S${s.speaker}</span>` : "";
-      return `<div class="seg"><span class="ts num">${fmtTime(s.t0)}</span>${chip}<span class="tx">${esc(s.text)}</span></div>`;
+      const flag = s.flag ? `<span class="chip flag" title="同じ文の繰り返しなど、音声認識の誤りの可能性があります（議事録の根拠にはしません）">${esc(s.flag)}</span>` : "";
+      return `<div class="seg"><span class="ts num">${fmtTime(s.t0)}</span>${chip}${flag}<span class="tx">${esc(s.text)}</span></div>`;
     })
     .join("") || '<div class="wait-note">（まだ発話がありません）</div>';
+  const legend = $(targetId + "-legend");   // 「要確認」の意味は、印の付いた行があるときだけ 1 行で示す
+  if (legend) legend.classList.toggle("hidden", !segs.some((s) => s.flag));
   if (followTranscript && targetId === "transcript-body") el.scrollTop = el.scrollHeight;
 }
 
 /* ---------- 待機画面 / 履歴 ---------- */
 async function refreshIdle() {
+  loadLastParticipants();
   try {
     const st = await (await fetch("/api/state")).json();
     if (st.status === "recording") {
@@ -362,8 +385,17 @@ async function openViewer(id) {
   viewerTab = m.minutes ? "minutes" : "transcript";
   $("v-title").textContent = (m.meta && m.meta.title) || "会議";
   const sec = (m.meta && m.meta.duration_sec) || 0;
-  $("v-meta").textContent = `${(m.meta && m.meta.datetime) || id} ・ ${Math.round(sec / 60)}分${String(sec % 60).padStart(2, "0")}秒`;
+  const who = (m.meta && m.meta.participants) || [];
+  $("v-meta").textContent = `${(m.meta && m.meta.datetime) || id} ・ ${Math.round(sec / 60)}分${String(sec % 60).padStart(2, "0")}秒`
+    + (who.length ? ` ・ 参加者: ${who.join("、")}` : "");
+  // 議事録が無い会議は生成の行を最初から出す。ある会議は「参加者を入れて作り直す」で出す
+  $("v-participants").value = who.join("、");
   $("v-regen-row").classList.toggle("hidden", !!m.minutes);
+  $("v-redo").classList.toggle("hidden", !m.minutes);
+  $("v-regen").textContent = m.minutes ? "議事録を作り直す" : "議事録をいま生成する";
+  $("v-regen-note").textContent = m.minutes
+    ? "担当者を参加者の中からだけ選び直します（作り直す前の議事録は控えとして残ります）"
+    : "（録音時はオフラインだったため文字起こしのみ保存されています）";
   $("v-html").classList.toggle("hidden", !m.has_html);
   renderViewer();
   uiState = "viewer";
@@ -405,7 +437,7 @@ if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
 $("rec-btn").addEventListener("click", startRecording);
 $("stop-btn").addEventListener("click", () => stopRecording(false));
 $("discard-btn").addEventListener("click", () => stopRecording(true));
-$("new-btn").addEventListener("click", () => { uiState = "idle"; setPill("idle", "待機中"); $("title-input").value = ""; show("start-view"); refreshIdle(); });
+$("new-btn").addEventListener("click", () => { uiState = "idle"; setPill("idle", "待機中"); $("title-input").value = ""; $("participants-input").value = ""; show("start-view"); refreshIdle(); });
 $("copy-btn").addEventListener("click", () => copyText(window._doneMinutes || "", $("copy-done")));
 $("html-btn").addEventListener("click", () => fetch("/api/open", { method: "POST", body: JSON.stringify({ id: window._doneId, file: "html" }) }));
 $("html-copy").addEventListener("click", () => copyHtmlFile(window._doneId, $("copy-done")));
@@ -437,12 +469,22 @@ async function copyHtmlFile(id, doneEl) {
 }
 $("v-html").addEventListener("click", () => fetch("/api/open", { method: "POST", body: JSON.stringify({ id: viewerData.id, file: "html" }) }));
 $("v-html-copy").addEventListener("click", () => copyHtmlFile(viewerData.id, null));
+$("v-redo").addEventListener("click", () => {
+  $("v-regen-row").classList.remove("hidden");
+  $("v-participants").focus();
+});
 $("v-regen").addEventListener("click", async () => {
-  $("v-regen").disabled = true;
-  $("v-regen").textContent = "生成中…（1〜2 分）";
-  const r = await (await fetch("/api/meeting/" + viewerData.id + "/summarize", { method: "POST" })).json();
-  $("v-regen").disabled = false;
-  $("v-regen").textContent = "議事録をいま生成する";
+  const btn = $("v-regen"), label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "生成中…（1〜2 分）";
+  let r = {};
+  try {
+    r = await (await fetch("/api/meeting/" + viewerData.id + "/summarize", {
+      method: "POST", body: JSON.stringify({ participants: $("v-participants").value.trim() }),
+    })).json();
+  } catch (e) { r = { error: String(e) }; }
+  btn.disabled = false;
+  btn.textContent = label;
   if (r.ok) { openViewer(viewerData.id); } else { alert("生成に失敗しました（オフライン?）: " + (r.error || "")); }
 });
 document.querySelectorAll(".tab").forEach((t) =>
@@ -458,7 +500,10 @@ window.addEventListener("beforeunload", (e) => {
 
 
 /* ---------- 用語辞書 ---------- */
-let dictRows = [];   // [{yomi, text, note, comments}]
+let dictRows = [];   // [{yomi, text, note, kind, kind_set, comments}]
+// 種別: 人名・社名は議事録の表記合わせにだけ使う（文字起こしのヒントには入れない）
+const DICT_KINDS = ["用語", "人名", "社名"];
+const HONORIFIC = /(さん|先生|様|さま|氏|くん|君|ちゃん|殿)$/;
 
 function renderDict() {
   const tb = $("dict-rows");
@@ -468,19 +513,39 @@ function renderDict() {
     (e.comments || []).forEach((c) => {
       const tr = document.createElement("tr");
       tr.className = "group-head";
-      tr.innerHTML = `<td colspan="4">${esc(c)}</td>`;
+      tr.innerHTML = `<td colspan="5">${esc(c)}</td>`;
       tb.appendChild(tr);
     });
+    const kind = DICT_KINDS.includes(e.kind) ? e.kind : "用語";
     const tr = document.createElement("tr");
     tr.innerHTML =
       `<td><input data-i="${i}" data-k="yomi" value="${esc(e.yomi || "")}" placeholder="わんせく"></td>` +
       `<td><input data-i="${i}" data-k="text" value="${esc(e.text || "")}" placeholder="1sec."></td>` +
+      `<td><select data-i="${i}" class="kind-select" title="人名・社名は文字起こしのヒントに入れず、議事録の表記合わせにだけ使います">` +
+      DICT_KINDS.map((k) => `<option value="${k}"${k === kind ? " selected" : ""}>${k}</option>`).join("") +
+      `</select></td>` +
       `<td><input data-i="${i}" data-k="note" value="${esc(e.note || "")}" placeholder=""></td>` +
       `<td><button class="del-btn" data-del="${i}" title="この行を削除">×</button></td>`;
     tb.appendChild(tr);
   });
   tb.querySelectorAll("input").forEach((el) =>
-    el.addEventListener("input", () => { dictRows[+el.dataset.i][el.dataset.k] = el.value; })
+    el.addEventListener("input", () => {
+      const row = dictRows[+el.dataset.i];
+      row[el.dataset.k] = el.value;
+      // 「〜さん」「〜先生」と打ったら種別を人名に寄せる（自分で選んだ種別は上書きしない）
+      if (el.dataset.k === "text" && !row.kind_set && HONORIFIC.test(el.value.trim()) && row.kind !== "人名") {
+        row.kind = "人名";
+        const sel = tb.querySelector(`select[data-i="${el.dataset.i}"]`);
+        if (sel) sel.value = "人名";
+      }
+    })
+  );
+  tb.querySelectorAll(".kind-select").forEach((el) =>
+    el.addEventListener("change", () => {
+      const row = dictRows[+el.dataset.i];
+      row.kind = el.value;
+      row.kind_set = true;
+    })
   );
   tb.querySelectorAll(".del-btn").forEach((b) =>
     b.addEventListener("click", () => { dictRows.splice(+b.dataset.del, 1); renderDict(); })
@@ -522,7 +587,7 @@ async function saveDict() {
 $("dict-open").addEventListener("click", openDict);
 $("dict-save").addEventListener("click", saveDict);
 $("dict-add").addEventListener("click", () => {
-  dictRows.push({ yomi: "", text: "", note: "", comments: [] });
+  dictRows.push({ yomi: "", text: "", note: "", kind: "用語", kind_set: false, comments: [] });
   renderDict();
   const inputs = $("dict-rows").querySelectorAll("input[data-k='yomi']");
   if (inputs.length) inputs[inputs.length - 1].focus();

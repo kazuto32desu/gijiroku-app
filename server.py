@@ -50,10 +50,12 @@ os.makedirs(MEETINGS, exist_ok=True)
 
 
 class Session:
-    def __init__(self, title: str):
+    def __init__(self, title: str, participants=None):
         now = datetime.now()
         self.id = now.strftime("%Y%m%d-%H%M%S")
         self.title = title.strip() or "会議"
+        # 参加者（任意）: 文字起こしのヒントと、議事録の担当者・話者名の候補はこの名前だけにする
+        self.participants = transcriber.normalize_participants(participants)
         self.dir = os.path.join(MEETINGS, self.id)
         os.makedirs(self.dir, exist_ok=True)
         self.started_at = time.time()
@@ -61,7 +63,8 @@ class Session:
         self.lock = threading.Lock()
         self.pcm = bytearray()
         self.processed = 0            # 文字起こし済みバイト数
-        self.segments = []            # [{t0, t1, text}]
+        self.segments = []            # [{t0, t1, text, (flag)}]  flag=要確認（繰り返し等）
+        self.removed = []             # 後処理で捨てた行（無音・繰り返し等）。transcript_removed.md に残す
         self.minutes_md = ""
         self.minutes_at = 0.0
         self.summarized_upto = 0
@@ -88,6 +91,7 @@ class Session:
             "duration_sec": round(len(self.pcm) / 2 / SR),
             "status": self.status,
             "num_speakers": self.num_speakers,
+            "participants": self.participants,
             "html_file": self.html_file,
             "pending_summary": not bool(self.minutes_md) if self.status == "done" else False,
         }
@@ -97,11 +101,16 @@ class Session:
         return f"{sec // 60}分{sec % 60:02d}秒"
 
     def transcript_text(self):
-        lines = []
-        for s in self.segments:
-            spk = f"スピーカー{s['speaker']}: " if s.get("speaker") else ""
-            lines.append(f"[{fmt_ts(s['t0'])}] {spk}{s['text']}")
-        return "\n".join(lines)
+        return segments_text(self.segments)
+
+
+def segments_text(segments):
+    lines = []
+    for s in segments:
+        spk = f"スピーカー{s['speaker']}: " if s.get("speaker") else ""
+        flag = f"（{s['flag']}）" if s.get("flag") else ""
+        lines.append(f"[{fmt_ts(s['t0'])}] {spk}{flag}{s['text']}")
+    return "\n".join(lines)
 
 
 STATE = {"session": None, "history_note": ""}
@@ -155,17 +164,27 @@ def transcribe_worker():
                     chunk = bytes(s.pcm[start : start + take])
                     s.processed = start + take
                 t0 = start / (SR * 2)
-                tail = s.segments[-1]["text"][-100:] if s.segments else ""
+                # 直前の発言をヒントに渡す。要確認の行・時間の空いた発言は渡さない（差し込みの連鎖を断つ）
+                tail = transcriber.context_tail(s.segments, t0)
+                removed = []
                 s.whisper_busy = True
                 try:
-                    subsegs = transcriber.transcribe_segments(chunk, tail)
+                    subsegs = transcriber.transcribe_segments(
+                        chunk, tail, participants=s.participants, removed=removed)
                 except Exception as e:
                     subsegs = []
                     s.last_error = f"文字起こしエラー: {e}"
                 s.whisper_busy = False
-                if subsegs:
-                    for rt0, rt1, text in subsegs:
-                        s.segments.append({"t0": round(t0 + rt0, 2), "t1": round(t0 + rt1, 2), "text": text})
+                for seg in subsegs + removed:
+                    seg["t0"] = round(t0 + seg["t0"], 2)
+                    seg["t1"] = round(t0 + seg["t1"], 2)
+                # 直近に同じ文が何度も出ていたら捨てる（「〇〇先生、おめでとうございます」の 30 連続など）
+                subsegs = transcriber.filter_repeats(
+                    subsegs, s.segments[-60:], removed,
+                    seen=[r for r in s.removed[-60:] if r.get("reason") == "繰り返し"])
+                s.removed.extend(removed)
+                if subsegs or removed:
+                    s.segments.extend(subsegs)
                     try:
                         with open(os.path.join(s.dir, "transcript.md"), "w", encoding="utf-8") as f:
                             f.write(transcript_md(s))
@@ -197,7 +216,7 @@ def summarize_worker():
         ):
             s.last_summary_try = time.time()
             upto = len(s.segments)
-            md, err = summarizer.live_minutes(s.transcript_text(), s.title)
+            md, err = summarizer.live_minutes(s.transcript_text(), s.title, s.participants)
             if md:
                 s.minutes_md = md
                 s.minutes_at = time.time()
@@ -210,12 +229,31 @@ def summarize_worker():
 
 
 def transcript_md(s: Session) -> str:
+    who = f"\n- 参加者: {'、'.join(s.participants)}" if s.participants else ""
     head = (
         f"---\ntitle: 文字起こし — {s.title}\ntype: workspace\ncreated: {s.started_str[:10]}\n"
         f"status: active\nowner: gijiroku-app\n---\n\n"
-        f"# 文字起こし — {s.title}\n\n- 日時: {s.started_str}（{s.duration_str()}）\n\n"
+        f"# 文字起こし — {s.title}\n\n- 日時: {s.started_str}（{s.duration_str()}）{who}\n\n"
     )
     return head + s.transcript_text() + "\n"
+
+
+def write_removed_log(s: Session):
+    """後処理で捨てた行を transcript_removed.md に残す（消しすぎていないか後から確かめられるように）。"""
+    if not s.removed:
+        return None
+    p = os.path.join(s.dir, "transcript_removed.md")
+    rows = [f"[{fmt_ts(r['t0'])}] （{r.get('reason', '')}）{r['text']}"
+            for r in sorted(s.removed, key=lambda r: r["t0"])]
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(
+            f"---\ntitle: 除外した行 — {s.title}\ntype: workspace\ncreated: {s.started_str[:10]}\n"
+            f"status: active\nowner: gijiroku-app\n---\n\n"
+            f"# 自動で除外した行 — {s.title}\n\n"
+            "無音の区間から出た文字・同じ文の繰り返し・定型の幻聴を、文字起こしと議事録から外しました。\n"
+            "大事な発言が混じっていないかの確認用です。\n\n" + "\n".join(rows) + "\n"
+        )
+    return p
 
 
 def run_diarization(wav_path: str):
@@ -296,11 +334,16 @@ def html_path(mid: str, meta: dict = None):
     return None
 
 
-def write_html(s: Session):
-    lines = [
-        (fmt_ts(seg["t0"]), f"スピーカー{seg['speaker']}" if seg.get("speaker") else None, seg["text"])
-        for seg in s.segments
+def html_lines(segments):
+    return [
+        (fmt_ts(seg["t0"]), f"スピーカー{seg['speaker']}" if seg.get("speaker") else None,
+         (f"（{seg['flag']}）" if seg.get("flag") else "") + seg["text"])
+        for seg in segments
     ]
+
+
+def write_html(s: Session):
+    lines = html_lines(s.segments)
     s.html_file = share_html_name(s.title, s.id.split("-")[0])
     hpath = os.path.join(s.dir, s.html_file)
     with open(hpath, "w", encoding="utf-8") as f:
@@ -340,12 +383,17 @@ def finalize(s: Session):
     tpath = os.path.join(s.dir, "transcript.md")
     with open(tpath, "w", encoding="utf-8") as f:
         f.write(transcript_md(s))
+    try:
+        write_removed_log(s)
+    except OSError:
+        pass
     # 最終議事録（オンライン時のみ。オフラインなら後から「議事録を生成」で再試行できる）
     mpath = os.path.join(s.dir, "minutes.md")
     if s.segments:
         s.phase = "minutes"
         md, err = summarizer.final_minutes(
-            s.transcript_text(), s.title, s.started_str, s.duration_str(), s.num_speakers
+            s.transcript_text(), s.title, s.started_str, s.duration_str(), s.num_speakers,
+            s.participants,
         )
         if md:
             with open(mpath, "w", encoding="utf-8") as f:
@@ -405,27 +453,56 @@ def read_meeting(mid: str):
     return out
 
 
-def regenerate_minutes(mid: str):
+def parse_transcript_segments(transcript: str):
+    """保存済みの transcript.md を [{t0, t1, text, (speaker), (flag)}] に戻す。"""
+    segs = []
+    marker = f"（{transcriber.FLAG}）"
+    for ts, spk, text in html_export.parse_transcript_md(transcript):
+        mm, ss = ts.split(":")
+        seg = {"t0": int(mm) * 60 + int(ss), "t1": int(mm) * 60 + int(ss), "text": text}
+        if spk:
+            seg["speaker"] = int(re.sub(r"\D", "", spk) or 0) or spk
+        if text.startswith(marker):
+            seg["text"], seg["flag"] = text[len(marker):], transcriber.FLAG
+        segs.append(seg)
+    return segs
+
+
+def regenerate_minutes(mid: str, participants=None):
+    """保存済みの文字起こしから議事録を作り直す。participants を渡すとその会議の参加者として保存して使う。
+    差し込み対策より前の文字起こしにも、作り直す前に後処理（繰り返し・偽の話者名の除去）をかける。"""
     m = read_meeting(mid)
     if not m or "transcript" not in m:
         return None, "文字起こしが見つかりません"
+    d = os.path.join(MEETINGS, mid)
     meta = m.get("meta", {})
-    body = re.sub(r"^---\n.*?\n---\n", "", m["transcript"], flags=re.S)
+    if participants is not None:
+        meta["participants"] = transcriber.normalize_participants(participants)
+        json_write(os.path.join(d, "meta.json"), meta)
+    plist = meta.get("participants") or []
+    segs = transcriber.clean_transcript(parse_transcript_segments(m["transcript"]))
     sec = meta.get("duration_sec", 0)
     dur = f"{sec // 60}分{sec % 60:02d}秒"
     n_spk = meta.get("num_speakers", 0)
+    title = meta.get("title", "会議")
     md, err = summarizer.final_minutes(
-        body, meta.get("title", "会議"), meta.get("datetime", mid), dur, n_spk
+        segments_text(segs), title, meta.get("datetime", mid), dur, n_spk, plist
     )
     if md:
-        with open(os.path.join(MEETINGS, mid, "minutes.md"), "w", encoding="utf-8") as f:
+        mpath = os.path.join(d, "minutes.md")
+        if os.path.exists(mpath):
+            shutil.copy2(mpath, mpath + ".bak")   # 作り直す前の版を残す
+        with open(mpath, "w", encoding="utf-8") as f:
             f.write(md + "\n")
-        # シェア用 HTML も同時に更新
-        lines = html_export.parse_transcript_md(m["transcript"])
-        with open(os.path.join(MEETINGS, mid, "minutes.html"), "w", encoding="utf-8") as f:
+        # シェア用 HTML も同時に更新（一覧・「HTML を開く」が参照する名前のファイルを書き換える）
+        hname = meta.get("html_file") or share_html_name(title, mid.split("-")[0])
+        with open(os.path.join(d, hname), "w", encoding="utf-8") as f:
             f.write(html_export.render(
-                meta.get("title", "会議"), meta.get("datetime", mid), dur, n_spk, md, lines
+                title, meta.get("datetime", mid), dur, n_spk, md, html_lines(segs)
             ))
+        if meta.get("html_file") != hname:
+            meta["html_file"] = hname
+            json_write(os.path.join(d, "meta.json"), meta)
     return md, err
 
 
@@ -556,7 +633,7 @@ class Handler(BaseHTTPRequestHandler):
                     data = json.loads(self._body() or b"{}")
                 except ValueError:
                     data = {}
-                STATE["session"] = Session(data.get("title", ""))
+                STATE["session"] = Session(data.get("title", ""), data.get("participants"))
             return self._json({"ok": True, "id": STATE["session"].id})
         if path == "/api/audio":
             s = STATE["session"]
@@ -601,7 +678,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "破棄できるのは開始10秒以内のみです"}, 409)
         if path.startswith("/api/meeting/") and path.endswith("/summarize"):
             mid = path.split("/")[3]
-            md, err = regenerate_minutes(mid)
+            try:
+                data = json.loads(self._body() or b"{}")
+            except ValueError:
+                data = {}
+            md, err = regenerate_minutes(mid, data.get("participants"))
             return self._json({"ok": bool(md), "minutes": md, "error": err})
         if path in ("/api/reveal", "/api/open"):
             try:

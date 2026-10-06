@@ -6,7 +6,8 @@ CSS 内蔵・外部依存なし・1 ファイルで完結（メール添付 / Sl
 import html
 import re
 
-_TRANSCRIPT_LINE = re.compile(r"^\[(\d{2}):(\d{2})\]\s*(?:(スピーカー\d+):\s*)?(.*)$")
+# 分は 100 分を超えると 3 桁になる（例: [120:15]）
+_TRANSCRIPT_LINE = re.compile(r"^\[(\d{2,}):(\d{2})\]\s*(?:(スピーカー\d+):\s*)?(.*)$")
 
 SPEAKER_COLORS = ["#D51F45", "#A85700", "#8A6D1C", "#8E1530", "#6E6E6E", "#1A1A1A"]
 
